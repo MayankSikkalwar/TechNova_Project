@@ -19,14 +19,18 @@ app = FastAPI(title="Stock Market Analysis API")
 # By default, python-dotenv does not overwrite already-defined environment variables.
 load_dotenv()
 
+origins = [
+    "http://localhost:3000",
+    "https://technova-project.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # The "*" tells the backend to accept requests from Vercel!
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 STOCKS = [
     "RELIANCE.NS",
     "HDFCBANK.NS",
