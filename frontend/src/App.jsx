@@ -6,10 +6,12 @@ import Navbar from "./components/layout/Navbar";
 import Sidebar from "./components/layout/Sidebar";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
-const STOCKS = ["RELIANCE.NS", "HDFCBANK.NS", "TCS.NS", "ITC.NS", "SUNPHARMA.NS"];
+const INITIAL_STOCKS = ["RELIANCE.NS", "HDFCBANK.NS", "TCS.NS", "ITC.NS", "SUNPHARMA.NS"];
 const TIMEFRAMES = ["1M", "3M", "6M", "1Y"];
+const REFRESH_INTERVAL = 30000; // 30 seconds for pseudo real-time
 
 export default function App() {
+  const [stocks, setStocks] = useState(INITIAL_STOCKS);
   // App-level state orchestration:
   // `selectedStock` and `selectedTimeframe` live here because both are shared dependencies
   // across Sidebar, Navbar, Chart, AI insights, and Chatbot context. Keeping shared state
@@ -23,6 +25,13 @@ export default function App() {
   const [error, setError] = useState("");
   const [analysisError, setAnalysisError] = useState("");
 
+  const handleAddStock = (ticker) => {
+    if (!stocks.includes(ticker)) {
+      setStocks((prev) => [ticker, ...prev]);
+    }
+    setSelectedStock(ticker);
+  };
+
   useEffect(() => {
     const controller = new AbortController();
     let isActive = true;
@@ -32,12 +41,14 @@ export default function App() {
      * 1) Fetch historical data first and render chart immediately.
      * 2) Fetch analysis data after that without blocking chart paint.
      */
-    const fetchDashboardData = async () => {
-      setIsLoading(true);
-      setAnalysisLoading(true);
-      setError("");
-      setAnalysisError("");
-      setAnalysisData(null);
+    const fetchDashboardData = async (isRefresh = false) => {
+      if (!isRefresh) {
+        setIsLoading(true);
+        setAnalysisLoading(true);
+        setError("");
+        setAnalysisError("");
+        setAnalysisData(null);
+      }
 
       try {
         const historicalUrl = `${API_BASE_URL}/api/historical/${selectedStock}?period=${selectedTimeframe}&timeframe=${selectedTimeframe}`;
@@ -48,29 +59,45 @@ export default function App() {
         }
 
         const historicalJson = await historicalRes.json();
+        const actualTicker = historicalJson?.ticker;
 
         if (!isActive) return;
+
+        // If backend corrected the ticker (e.g. ADANI POWER -> ADANIPOWER.NS), update local state
+        if (actualTicker && actualTicker !== selectedStock) {
+          setStocks((prev) => {
+            const listWithoutOld = prev.filter((s) => s !== selectedStock);
+            if (!listWithoutOld.includes(actualTicker)) {
+              return [actualTicker, ...listWithoutOld];
+            }
+            return listWithoutOld;
+          });
+          setSelectedStock(actualTicker);
+        }
+
         const normalizedCandles = Array.isArray(historicalJson?.candles)
           ? historicalJson.candles.map((item) => ({
-              ...item,
-              time: item?.time ?? item?.date ?? item?.Date,
-            }))
+            ...item,
+            time: item?.time ?? item?.date ?? item?.Date,
+          }))
           : [];
         setHistoricalData(normalizedCandles);
       } catch (fetchErr) {
         if (controller.signal.aborted) return;
-        const message =
-          fetchErr instanceof Error
-            ? fetchErr.message
-            : "Unexpected error while loading historical data.";
+        let message = "Unexpected error while loading historical data.";
+        if (fetchErr instanceof Error) {
+          message = fetchErr.message;
+        }
+
         if (!isActive) return;
         setError(message);
-        setHistoricalData([]);
+        if (!isRefresh) setHistoricalData([]);
       } finally {
         if (!isActive) return;
         setIsLoading(false);
       }
 
+      // Analysis refresh (optional, but keep it updated)
       try {
         const analysisUrl = `${API_BASE_URL}/api/analysis/${selectedStock}`;
         const analysisRes = await fetch(analysisUrl, { signal: controller.signal });
@@ -83,13 +110,12 @@ export default function App() {
         setAnalysisData(analysisJson ?? null);
       } catch (fetchErr) {
         if (controller.signal.aborted) return;
-        const message =
-          fetchErr instanceof Error
-            ? fetchErr.message
-            : "Unexpected error while loading analysis data.";
         if (!isActive) return;
-        setAnalysisError(message);
-        setAnalysisData(null);
+        // Don't overwrite the main error if it's just a refresh analysis failure
+        if (!isRefresh) {
+          setAnalysisError(fetchErr.message);
+          setAnalysisData(null);
+        }
       } finally {
         if (!isActive) return;
         setAnalysisLoading(false);
@@ -97,9 +123,16 @@ export default function App() {
     };
 
     fetchDashboardData();
+
+    // Set up real-time refresh interval
+    const interval = setInterval(() => {
+      fetchDashboardData(true);
+    }, REFRESH_INTERVAL);
+
     return () => {
       isActive = false;
       controller.abort();
+      clearInterval(interval);
     };
   }, [selectedStock, selectedTimeframe]);
 
@@ -116,7 +149,12 @@ export default function App() {
           Desktop (lg): returns to locked, edge-to-edge trading terminal with left/center/right panels. */}
       <main className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <div className="w-full border-b border-slate-800 lg:w-56 lg:min-h-0 lg:border-b-0">
-          <Sidebar stocks={STOCKS} selectedStock={selectedStock} onStockChange={setSelectedStock} />
+          <Sidebar
+            stocks={stocks}
+            selectedStock={selectedStock}
+            onStockChange={setSelectedStock}
+            onAddStock={handleAddStock}
+          />
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col">

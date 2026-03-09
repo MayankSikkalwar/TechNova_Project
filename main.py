@@ -21,8 +21,7 @@ load_dotenv()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000" ,"http://localhost:5173",
-        "http://127.0.0.1:5173"],
+    allow_origins=["*"], # The "*" tells the backend to accept requests from Vercel!
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -70,9 +69,29 @@ def get_historical_data(
         raise HTTPException(status_code=400, detail="Invalid timeframe. Use 1M, 3M, 6M, or 1Y.")
 
     period = TIMEFRAME_TO_PERIOD[tf]
-    data = yf.Ticker(ticker).history(period=period, interval="1d")
-    if data.empty:
-        raise HTTPException(status_code=404, detail=f"No historical data found for ticker: {ticker}")
+    
+    # Ticker auto-correction logic
+    candidate_tickers = [ticker.upper()]
+    if "." not in ticker:
+        candidate_tickers.append(f"{ticker.upper()}.NS")
+    
+    cleaned = ticker.replace(" ", "").upper()
+    if cleaned not in candidate_tickers:
+        candidate_tickers.append(cleaned)
+        if "." not in cleaned:
+            candidate_tickers.append(f"{cleaned}.NS")
+
+    db_ticker = None
+    data = None
+    
+    for t in candidate_tickers:
+        data = yf.Ticker(t).history(period=period, interval="1d")
+        if not data.empty:
+            db_ticker = t
+            break
+
+    if db_ticker is None or data.empty:
+        raise HTTPException(status_code=404, detail=f"No historical data found for ticker: {ticker}. Try a valid symbol like ADANIPOWER.NS")
 
     response = []
     for index, row in data.iterrows():
@@ -87,14 +106,34 @@ def get_historical_data(
             }
         )
 
-    return {"ticker": ticker, "timeframe": tf, "candles": response}
+    return {"ticker": db_ticker, "timeframe": tf, "candles": response}
 
 
 @app.get("/api/analysis/{ticker}")
 def get_analysis(ticker: str):
-    stock = yf.Ticker(ticker)
-    data = stock.history(period="1y", interval="1d")
-    if data.empty:
+    # Repeat the same robust ticker lookup logic for analysis
+    candidate_tickers = [ticker.upper()]
+    if "." not in ticker:
+        candidate_tickers.append(f"{ticker.upper()}.NS")
+    
+    cleaned = ticker.replace(" ", "").upper()
+    if cleaned not in candidate_tickers:
+        candidate_tickers.append(cleaned)
+        if "." not in cleaned:
+            candidate_tickers.append(f"{cleaned}.NS")
+
+    stock = None
+    data = None
+    actual_ticker = None
+    
+    for t in candidate_tickers:
+        stock = yf.Ticker(t)
+        data = stock.history(period="1y", interval="1d")
+        if not data.empty:
+            actual_ticker = t
+            break
+
+    if actual_ticker is None or data.empty:
         raise HTTPException(status_code=404, detail=f"No analysis data found for ticker: {ticker}")
 
     df = data[["Close", "Volume"]].copy()
@@ -148,7 +187,13 @@ def get_analysis(ticker: str):
     try:
         # gnews fetches Google News RSS results. We use the company name for better relevance
         # and append "NSE stock India" to bias toward Indian market coverage.
-        query_company = TICKER_TO_COMPANY.get(ticker.upper(), ticker.replace(".NS", ""))
+        query_company = TICKER_TO_COMPANY.get(ticker.upper())
+        if not query_company:
+            try:
+                query_company = stock.info.get("longName") or stock.info.get("shortName") or ticker.replace(".NS", "")
+            except Exception:
+                query_company = ticker.replace(".NS", "")
+        
         query = f"{query_company} NSE stock India"
 
         google_news = GNews(language="en", country="IN", max_results=5)
@@ -196,7 +241,7 @@ def get_analysis(ticker: str):
         sentiment_label = "Neutral"
 
     return {
-        "ticker": ticker,
+        "ticker": actual_ticker,
         "trend_analysis": {
             "sma_50": sma_50,
             "sma_200": sma_200,
